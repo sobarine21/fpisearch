@@ -1,15 +1,13 @@
 import streamlit as st
 import requests
 from googleapiclient.discovery import build
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
-from langdetect import detect
-import re
 import pandas as pd
+import re
 import matplotlib.pyplot as plt
-import warnings
 from wordcloud import WordCloud
+import warnings
+import time
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
@@ -17,86 +15,83 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 API_KEY = st.secrets["GOOGLE_API_KEY"]
 CX = st.secrets["GOOGLE_SEARCH_ENGINE_ID"]
 
-if 'detected_matches' not in st.session_state:
-    st.session_state.detected_matches = []
-
-# UI Styling
+# UI Setup
+st.title("🔎 Robust FPI Investor Email Finder")
 st.markdown("""
-    <style>
-        .css-1r6p8d1, .css-1v3t3fg, header, .css-1tqja98 {display: none;}
-        .stTextInput>div>div>input {background-color: #f0f0f5; border-radius: 10px;}
-        .stButton>button {background-color: #5e35b1; color: white; border-radius: 10px; padding: 10px 20px;}
-    </style>
-""", unsafe_allow_html=True)
-
-st.title("🔎 FPI Investor Email Finder")
-st.markdown("""
-Upload an Excel file with the columns: **Name**, **Registration No.**, and **Address**.  
-This tool finds relevant websites and extracts email addresses for FPI investors.
+Upload an Excel file (.xlsx) with **Name**, **Registration No.**, and **Address**.  
+This version uses smarter Google search queries and parses even obfuscated emails like `contact [at] xyz.com`.
 """)
 
-# Excel uploader
-uploaded_file = st.file_uploader("Upload Excel (.xlsx) file:", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload Excel file:", type=["xlsx"])
 df = None
-
-if uploaded_file is not None:
+if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
         required_cols = {"Name", "Registration No.", "Address"}
         if not required_cols.issubset(df.columns):
-            st.error("The Excel file must contain columns: Name, Registration No., and Address.")
+            st.error("File must contain: Name, Registration No., Address")
             df = None
         else:
-            st.success(f"Loaded {len(df)} investor records.")
+            st.success(f"✅ Loaded {len(df)} records.")
     except Exception as e:
-        st.error(f"Error reading Excel file: {e}")
+        st.error(f"❌ Error reading file: {e}")
+        df = None
 
 # Email extraction
 def extract_emails_from_html(html):
     soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text()
-    email_pattern = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
-    emails = set(re.findall(email_pattern, text))
-    cleaned = {e for e in emails if not e.lower().endswith(('.png', '.jpg', '.jpeg', '.svg', '.gif'))}
-    cleaned = {e.strip(".;,") for e in cleaned if len(e) > 6 and "." in e}
-    return list(cleaned)
+    text = soup.get_text(separator=" ")
 
-# Get best site
+    # Match regular & obfuscated emails
+    regex = r'''(?:[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+|[a-zA-Z0-9_.+-]+\s?\[\s?at\s?\]\s?[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)'''
+    raw_emails = re.findall(regex, text)
+
+    cleaned_emails = []
+    for e in raw_emails:
+        e = e.replace(" [at] ", "@").replace("[at]", "@").replace(" ", "")
+        e = e.strip(".,;:()[]<>")
+        if "@" in e and not e.lower().endswith(('.png', '.jpg', '.jpeg', '.svg', '.gif')):
+            cleaned_emails.append(e)
+    return list(set(cleaned_emails))
+
+# Improved query
 def get_best_website_for_name(name, service):
+    query = f'"{name}" contact email site:.org OR site:.com'
     try:
-        response = service.cse().list(q=name, cx=CX, num=3).execute()
+        response = service.cse().list(q=query, cx=CX, num=3).execute()
         candidates = []
-        for result in response.get('items', []):
-            url = result['link']
-            snippet = result.get('snippet', "")
+        for item in response.get("items", []):
+            url = item["link"]
+            snippet = item.get("snippet", "")
             if "contact" in url.lower() or "email" in snippet.lower():
                 return url
             candidates.append(url)
         if candidates:
             return candidates[0]
-    except Exception:
-        pass
+    except Exception as e:
+        return f"Error: {e}"
     return None
 
-# Crawl
 def crawl_and_get_emails(url):
     try:
-        resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
-        if resp.status_code == 200:
-            html = resp.text
-            return extract_emails_from_html(html)
+        if url.startswith("Error"):
+            return []
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, timeout=12, headers=headers)
+        if response.status_code == 200:
+            return extract_emails_from_html(response.text)
     except Exception:
         pass
     return []
 
-# Run search
-if st.button("🔍 Find Emails for Uploaded FPI Investors") and df is not None:
-    with st.spinner('⏳ Searching web and extracting emails...'):
+# Main logic
+if st.button("🔍 Start Email Search") and df is not None:
+    with st.spinner("Processing... Please wait..."):
         service = build("customsearch", "v1", developerKey=API_KEY)
         results = []
 
         for idx, row in df.iterrows():
-            name = row["Name"]
+            name = str(row["Name"])
             reg_no = row["Registration No."]
             address = row["Address"]
 
@@ -107,40 +102,42 @@ if st.button("🔍 Find Emails for Uploaded FPI Investors") and df is not None:
                 "Name": name,
                 "Registration No.": reg_no,
                 "Address": address,
-                "Website": website or "Not found",
+                "Website": website if website else "Not found",
                 "Emails": ", ".join(emails) if emails else "Not found"
             })
 
-        output_df = pd.DataFrame(results)
-        st.session_state.detected_matches = results
+            # Optional: Respect rate limits
+            time.sleep(1.2)
 
-        st.success(f"✅ Completed. Found data for {len(output_df)} investors.")
+        output_df = pd.DataFrame(results)
+        found_count = output_df[output_df["Emails"] != "Not found"].shape[0]
+
+        st.success(f"🎉 Found email addresses for {found_count} of {len(output_df)} investors.")
         st.dataframe(output_df)
 
-        # Download button
-        csv_bytes = output_df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📥 Download Results as CSV",
-            data=csv_bytes,
-            file_name="fpi_investor_emails.csv",
+            label="📥 Download Results",
+            data=output_df.to_csv(index=False).encode("utf-8"),
+            file_name="fpi_emails_output.csv",
             mime="text/csv"
         )
 
-        # Word Cloud
+        # Optional word cloud
         all_emails = [email for row in results for email in row["Emails"].split(", ") if "@" in email]
         if all_emails:
             domains = [e.split("@")[1] for e in all_emails]
             domain_text = " ".join(domains)
-            st.subheader("🌐 Word Cloud of Email Domains")
+            st.subheader("📊 Word Cloud of Email Domains")
             wordcloud = WordCloud(width=800, height=300, background_color='white').generate(domain_text)
             plt.figure(figsize=(8, 3))
             plt.imshow(wordcloud, interpolation='bilinear')
             plt.axis('off')
             st.pyplot(plt)
 
-# Self-hosting info
+# Self-hosting
 st.markdown("""
-### Self-Hosting
-To run this app locally or on your own server, visit:  
+---
+### 🛠 Self-Hosting
+You can host this app yourself.  
 👉 [Download Source Code](https://dhruvbansal8.gumroad.com/l/hhwbm)
 """)
