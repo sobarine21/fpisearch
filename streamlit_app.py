@@ -15,44 +15,44 @@ from wordcloud import WordCloud
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 # Set up the Google API keys and Custom Search Engine ID
-API_KEY = st.secrets["GOOGLE_API_KEY"]  # Your Google API key from Streamlit secrets
-CX = st.secrets["GOOGLE_SEARCH_ENGINE_ID"]  # Your Google Custom Search Engine ID
+API_KEY = st.secrets["GOOGLE_API_KEY"]
+CX = st.secrets["GOOGLE_SEARCH_ENGINE_ID"]
 
-# Initializing session state for detected matches
+# Initialize session state
 if 'detected_matches' not in st.session_state:
     st.session_state.detected_matches = []
 
-# Custom CSS to style the page
+# Hide Streamlit default styles
 hide_streamlit_style = """
     <style>
-        .css-1r6p8d1 {display: none;} 
-        .css-1v3t3fg {display: none;} 
-        header {visibility: hidden;} 
-        .css-1tqja98 {visibility: hidden;} 
+        .css-1r6p8d1 {display: none;}
+        .css-1v3t3fg {display: none;}
+        header {visibility: hidden;}
+        .css-1tqja98 {visibility: hidden;}
         .stTextInput>div>div>input {background-color: #f0f0f5; border-radius: 10px;}
         .stButton>button {background-color: #5e35b1; color: white; border-radius: 10px; padding: 10px 20px;}
     </style>
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
-# Streamlit UI for title and description
+# Title and description
 st.title("🔎 FPI Investor Email Finder")
 st.markdown("""
-Upload a CSV file with a column "Name" containing FPI investor names.  
-For each name, we will search the web, find the most relevant website, extract email addresses, and let you download the results as CSV.
+Upload a CSV file with columns: `Name`, `Registration No.`, and `Address`.  
+For each investor, we'll search the web, find the most relevant site, extract email addresses, and let you download the results.
 """)
 
-# CSV upload UI
-uploaded_file = st.file_uploader("Upload CSV file with a column 'Name':", type=["csv"])
-fpi_names = None
-
+# Upload CSV file
+uploaded_file = st.file_uploader("Upload CSV file with headers 'Name', 'Registration No.', 'Address':", type=["csv"])
+df = None
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
-    if "Name" not in df.columns:
-        st.error("CSV must have a column named 'Name'.")
+    required_cols = {"Name", "Registration No.", "Address"}
+    if not required_cols.issubset(df.columns):
+        st.error("CSV must have columns: 'Name', 'Registration No.', and 'Address'.")
+        df = None
     else:
-        fpi_names = df["Name"].dropna().unique().tolist()
-        st.success(f"Loaded {len(fpi_names)} investor names.")
+        st.success(f"Loaded {len(df)} investors.")
 
 # Email extraction util
 def extract_emails_from_html(html):
@@ -60,21 +60,17 @@ def extract_emails_from_html(html):
     text = soup.get_text()
     email_pattern = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
     emails = set(re.findall(email_pattern, text))
-    # Remove likely false-positives (e.g. images, scripts, css)
     cleaned = {e for e in emails if not e.lower().endswith(('.png', '.jpg', '.jpeg', '.svg', '.gif'))}
-    # Remove prefixes/suffixes that are artifacts
     cleaned = {e.strip(".;,") for e in cleaned if len(e) > 6 and "." in e}
     return list(cleaned)
 
 def get_best_website_for_name(name, service):
-    # Use Google Custom Search API to get the best site for the investor
     try:
         response = service.cse().list(q=name, cx=CX, num=3).execute()
         candidates = []
         for result in response.get('items', []):
             url = result['link']
             snippet = result.get('snippet', "")
-            # Prefer pages that actually mention email/contact
             if "contact" in url.lower() or "email" in snippet.lower():
                 return url
             candidates.append(url)
@@ -89,36 +85,39 @@ def crawl_and_get_emails(url):
         resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code == 200:
             html = resp.text
-            emails = extract_emails_from_html(html)
-            return emails
+            return extract_emails_from_html(html)
     except Exception:
         pass
     return []
 
 # Main logic
-if st.button("🔍 Find Emails for Uploaded FPI Investors") and fpi_names:
-    with st.spinner('⏳ Processing investor names and searching for emails...'):
+if st.button("🔍 Find Emails for Uploaded FPI Investors") and df is not None:
+    with st.spinner('⏳ Searching for emails...'):
         service = build("customsearch", "v1", developerKey=API_KEY)
         results = []
-        for name in fpi_names:
+        for idx, row in df.iterrows():
+            name = row["Name"]
+            reg_no = row["Registration No."]
+            address = row["Address"]
+
             website = get_best_website_for_name(name, service)
-            emails = []
-            if website:
-                emails = crawl_and_get_emails(website)
+            emails = crawl_and_get_emails(website) if website else []
+
             results.append({
                 "Name": name,
+                "Registration No.": reg_no,
+                "Address": address,
                 "Website": website or "Not found",
                 "Emails": ", ".join(emails) if emails else "Not found"
             })
+
         output_df = pd.DataFrame(results)
         st.session_state.detected_matches = results
 
-        st.success(f"Done! Found emails for {len(fpi_names)} investors.")
-
-        # Show sample results
+        st.success(f"Done! Processed {len(output_df)} investors.")
         st.dataframe(output_df)
 
-        # Download as CSV
+        # Download CSV
         csv_bytes = output_df.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Download Emails as CSV",
@@ -127,7 +126,7 @@ if st.button("🔍 Find Emails for Uploaded FPI Investors") and fpi_names:
             mime="text/csv"
         )
 
-        # Optional: Word cloud of email domains
+        # Word cloud
         all_emails = [email for row in results for email in row["Emails"].split(", ") if "@" in email]
         if all_emails:
             domains = [e.split("@")[1] for e in all_emails if "@" in e]
@@ -139,11 +138,11 @@ if st.button("🔍 Find Emails for Uploaded FPI Investors") and fpi_names:
             plt.axis('off')
             st.pyplot(plt)
 
-# Add Self-hosting and Source Code section
+# Self-hosting info
 st.markdown(
     """
     ### Self-Hosting
-    If you want to self-host this application or download the source code, please visit:  
-        👉 [Download Source Code](https://dhruvbansal8.gumroad.com/l/hhwbm?_gl=1*1hk16wi*_ga*MTQwNDE3ODM4My4xNzM0MzcyNTUw*_ga_6LJN6D94N6*MTc0MDU4NTEwMi4yNS4xLjE3NDA1ODY3NDMuMC4wLjA.)
+    Want to run this locally or on your server?  
+    👉 [Download Source Code](https://dhruvbansal8.gumroad.com/l/hhwbm)
     """
 )
