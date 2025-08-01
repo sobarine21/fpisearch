@@ -10,3 +10,4 @@ textstat
 matplotlib
 pandas
 numpy
+openpyxl
