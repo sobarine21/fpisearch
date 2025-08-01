@@ -1,1 +1,12 @@
 streamlit
+requests
+google-api-python-client
+scikit-learn
+beautifulsoup4
+langdetect
+textblob
+wordcloud
+textstat
+matplotlib
+pandas
+numpy
